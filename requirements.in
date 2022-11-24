@@ -1,0 +1,13 @@
+numpy
+pandas
+pillow
+torch
+black
+datasets
+transformers
+jupyter
+jupyter_contrib_nbextensions
+tensorflow
+matplotlib
+scikit-learn
+miceforest
