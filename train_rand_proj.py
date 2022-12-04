@@ -16,13 +16,10 @@ print("DEVICE IS ... ", device)
 
 
 class MultiTaskNet(nn.Module):
-    def __init__(
-        self, rand_proj_mat, embed_dim=11348, layer_sizes=[11348, 500, 11348, 500]
-    ):
+    def __init__(self, embed_dim=11348, layer_sizes=[2048, 500, 2048, 500]):
         super().__init__()
 
         self.embedding_dim = embed_dim
-        self.rand_proj_mat = rand_proj_mat
 
         self.mlp_net = nn.Sequential(
             nn.Linear(layer_sizes[0], layer_sizes[1]),  ## 96x64
@@ -37,7 +34,6 @@ class MultiTaskNet(nn.Module):
         )  ## change if we need classification or softmax
 
     def forward(self, x):
-        x = self.rand_proj_mat @ x
         x = self.mlp_net(x)
 
         out_x = self.last_layer(x)
@@ -45,33 +41,32 @@ class MultiTaskNet(nn.Module):
         return out_x
 
 
-dataset = datasets.load_dataset(
-    "parquet",
-    data_files={
-        "train": "train_20221130.parquet.gzip",
-        "dev": "dev_20221130.parquet.gzip",
-        "test": "test_20221130.parquet.gzip",
-    },
+with open("data/train_random_proj.pt", "rb") as f:
+    train_proj = torch.load(f)
+with open("data/dev_random_proj.pt", "rb") as f:
+    dev_proj = torch.load(f)
+with open("data/test_random_proj.pt", "rb") as f:
+    test_proj = torch.load(f)
+
+train_labels = pd.read_parquet(
+    "data/train_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
+)
+dev_labels = pd.read_parquet(
+    "data/dev_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
+)
+test_labels = pd.read_parquet(
+    "data/test_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
 )
 
 print("DATA LOADED")
 
-with open("drop_cols.pickle", "rb") as f:
-    other_keys = pickle.load(f)
 
-
-def collate_fn_restructure(data):
-
-    df = pd.DataFrame(
-        data,
-    )
-    all_keys = list(df.keys())
-    feat_keys = [i for i in all_keys if i not in other_keys]
-
-    x_inp = torch.tensor(df[feat_keys].values, dtype=torch.float32, device=device)
-    y_bmi = torch.tensor(df["Mean_BMI"].values, dtype=torch.float32, device=device)
+def collate_fn(data):
+    x, y_df = data
+    x_inp = x.to(device)
+    y_bmi = torch.tensor(y_df["Mean_BMI"].values, dtype=torch.float32, device=device)
     y_cmr = torch.tensor(
-        df["Under5_Mortality_Rate"].values, dtype=torch.float32, device=device
+        y_df["Under5_Mortality_Rate"].values, dtype=torch.float32, device=device
     )
     return x_inp, y_bmi, y_cmr
 
@@ -82,21 +77,18 @@ batch_size = 16
 
 print("data loaders ...")
 train_dataloader = DataLoader(
-    dataset["train"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    (train_proj, train_labels), batch_size=batch_size, collate_fn=collate_fn
 )
 dev_dataloader = DataLoader(
-    dataset["dev"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    (dev_proj, dev_labels), batch_size=batch_size, collate_fn=collate_fn
 )
 test_dataloader = DataLoader(
-    dataset["test"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    (test_proj, test_labels), batch_size=batch_size, collate_fn=collate_fn
 )
 
-print("loading random projection matrix")
-with open("rand_proj.pt", "rb") as f:
-    rand_proj = torch.load(f)
 
 print("Model loading")
-model = MultiTaskNet(rand_proj).to(device)
+model = MultiTaskNet().to(device)
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
