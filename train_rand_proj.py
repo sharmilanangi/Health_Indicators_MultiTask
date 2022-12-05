@@ -87,16 +87,26 @@ test_dataloader = DataLoader(
 )
 
 
+def masked_mse(output, target):
+    mse_loss = nn.MSELoss(reduction="none")
+    mask = ~target.isnan()
+    loss = mse_loss(output, target)
+    loss = (loss * mask.float()).sum()  # gives \sigma_euclidean over unmasked elements
+    return loss / loss.numel()
+
+
 print("Model loading")
 model = MultiTaskNet().to(device)
-loss_fn = nn.MSELoss()
+loss_fn = masked_mse
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
 
 def r2_loss(output, target):
-    target_mean = torch.mean(target)
-    ss_tot = torch.sum((target - target_mean) ** 2)
-    ss_res = torch.sum((target - output) ** 2)
+    mask = ~target.isnan()
+    mask = mask.float()
+    target_mean = torch.nanmean(target)
+    ss_tot = torch.sum(((target - target_mean) * mask) ** 2)
+    ss_res = torch.sum(((target - output) * mask) ** 2)
     r2 = 1 - ss_res / ss_tot
     return r2
 
