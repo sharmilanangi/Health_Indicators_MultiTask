@@ -8,9 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import tqdm
+
+import scipy
+from scipy import stats
+
 from torch.utils.tensorboard import SummaryWriter
 
-
+BEST_MODEL_FILE = "outputs/best_bmi.pth"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
@@ -75,8 +79,8 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 200
-lr = 1e-5
+epochs = 100
+lr = 1e-4
 batch_size = 256
 
 print("data loaders ...")
@@ -121,8 +125,10 @@ def evaluate_model(model, dataloader):
     mse_bmi = []
     mse_cmr = []
 
-    r2_bmi_vals = []
-    r2_cmr_vals = []
+    all_preds_bmi = []
+    all_preds_cmr = []
+    all_y_bmi = []
+    all_y_cmr = []
 
     mse_loss = []
 
@@ -131,30 +137,83 @@ def evaluate_model(model, dataloader):
         with torch.no_grad():
             out_bmi, out_cmr = model(x)
             out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
-
             loss_bmi = loss_fn(out_bmi, y_cmr)
             loss_cmr = loss_fn(out_cmr, y_cmr)
-
             loss = loss_bmi + loss_cmr
 
-            r2_bmi = r2_loss(out_bmi, y_cmr)
-            r2_cmr = r2_loss(out_cmr, y_cmr)
-
-            mse_loss.append(loss.item())
             mse_bmi.append(loss_bmi.item())
             mse_cmr.append(loss_cmr.item())
+            mse_loss.append(loss.item())
 
-            r2_bmi_vals.append(r2_bmi.item())
-            r2_cmr_vals.append(r2_cmr.item())
+            all_y_cmr.append(y_cmr.cpu().numpy())
+            all_y_bmi.append(y_bmi.cpu().numpy())
+            preds_bmi_numpy = out_bmi.detach().cpu().numpy()
+            all_preds_bmi.append(preds_bmi_numpy)
+            preds_cmr_numpy = out_cmr.detach().cpu().numpy()
+            all_preds_cmr.append(preds_cmr_numpy)
+
+    all_preds_bmi = np.concatenate(all_preds_bmi, axis=0)
+    all_preds_cmr = np.concatenate(all_preds_cmr, axis=0)
+    all_y_bmi = np.concatenate(all_y_bmi, axis=0)
+    all_y_cmr = np.concatenate(all_y_cmr, axis=0)
 
     mse_loss_avg = np.array(mse_loss).mean()
     mse_bmi_avg = np.array(mse_bmi).mean()
     mse_cmr_avg = np.array(mse_cmr).mean()
 
-    r2_cmr_avg = np.array(r2_cmr_vals).mean()
-    r2_bmi_avg = np.array(r2_bmi_vals).mean()
+    bad = ~np.logical_or(np.isnan(all_preds_bmi), np.isnan(all_y_bmi))
+    all_preds_filtered = np.compress(bad, all_preds_bmi)
+    all_y_bmi_filtered = np.compress(bad, all_y_bmi)
+    r2_bmi, _ = stats.pearsonr(all_preds_filtered, all_y_bmi_filtered)
+    r2_bmi = r2_bmi**2
 
-    return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi_avg, r2_cmr_avg
+    bad = ~np.logical_or(np.isnan(all_preds_cmr), np.isnan(all_y_cmr))
+    all_preds_filtered = np.compress(bad, all_preds_cmr)
+    all_y_cmr_filtered = np.compress(bad, all_y_cmr)
+    r2_cmr, _ = stats.pearsonr(all_preds_filtered, all_y_cmr_filtered)
+    r2_cmr = r2_cmr**2
+
+    return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi, r2_cmr
+
+
+# def evaluate_model(model, dataloader):
+#     mse_bmi = []
+#     mse_cmr = []
+
+#     r2_bmi_vals = []
+#     r2_cmr_vals = []
+
+#     mse_loss = []
+
+#     for idx, batch in enumerate(dataloader):
+#         x, y_bmi, y_cmr = batch
+#         with torch.no_grad():
+#             out_bmi, out_cmr = model(x)
+#             out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
+
+#             loss_bmi = loss_fn(out_bmi, y_cmr)
+#             loss_cmr = loss_fn(out_cmr, y_cmr)
+
+#             loss = loss_bmi + loss_cmr
+
+#             r2_bmi = r2_loss(out_bmi, y_cmr)
+#             r2_cmr = r2_loss(out_cmr, y_cmr)
+
+#             mse_loss.append(loss.item())
+#             mse_bmi.append(loss_bmi.item())
+#             mse_cmr.append(loss_cmr.item())
+
+#             r2_bmi_vals.append(r2_bmi.item())
+#             r2_cmr_vals.append(r2_cmr.item())
+
+#     mse_loss_avg = np.array(mse_loss).mean()
+#     mse_bmi_avg = np.array(mse_bmi).mean()
+#     mse_cmr_avg = np.array(mse_cmr).mean()
+
+#     r2_cmr_avg = np.array(r2_cmr_vals).mean()
+#     r2_bmi_avg = np.array(r2_bmi_vals).mean()
+
+#     return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi_avg, r2_cmr_avg
 
 
 writer = SummaryWriter("logdir/multitask_randproj")
@@ -232,6 +291,8 @@ for e in range(epochs):
     )
 
 print("TESTING THE MODEL")
+
+model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
 
 (
     test_mse_bmi_avg,

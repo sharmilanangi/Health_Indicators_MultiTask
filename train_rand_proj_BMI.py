@@ -8,9 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import tqdm
+
+import scipy
+from scipy import stats
+
 from torch.utils.tensorboard import SummaryWriter
 
-
+BEST_MODEL_FILE = "outputs/best_bmi.pth"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
@@ -71,22 +75,13 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 1  # 100
+epochs = 100
 lr = 1e-4
 batch_size = 256
 
 print("data loaders ...")
 
 
-# train_dataloader = DataLoader(
-#     (train_proj, train_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
-# dev_dataloader = DataLoader(
-#     (dev_proj, dev_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
-# test_dataloader = DataLoader(
-#     (test_proj, test_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
 train_dataloader = DataLoader(
     TensorDataset(*collate_fn((train_proj, train_labels))), batch_size=batch_size
 )
@@ -112,34 +107,47 @@ loss_fn = masked_mse
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
 
-def r2_loss(output, target):
-    target_mean = torch.nanmean(target)
-    ss_tot = torch.nansum(((target - target_mean)) ** 2)
-    ss_res = torch.nansum(((target - output)) ** 2)
-    r2 = 1 - ss_res / ss_tot
+# def r2_loss(output, target):
+#     target_mean = torch.nanmean(target)
+#     ss_tot = torch.nansum(((target - target_mean)) ** 2)
+#     ss_res = torch.nansum(((target - output)) ** 2)
+#     r2 = 1 - ss_res / ss_tot
 
-    mask = torch.isnan(target)
-    return torch.where(mask, 0.0, r2)
+#     mask = torch.isnan(target)
+#     return torch.where(mask, 0.0, r2)
 
 
 def evaluate_model(model, dataloader):
     mse_loss = []
-    r2_losses = []
+
+    all_preds = []
+    all_y_bmi = []
 
     for idx, batch in enumerate(dataloader):
         x, y_bmi, y_cmr = batch
         with torch.no_grad():
             outs = model(x).squeeze()
             loss = loss_fn(outs, y_bmi)
-            r2_val_loss = r2_loss(outs, y_bmi)
 
             mse_loss.append(loss.item())
-            r2_losses.append(r2_val_loss.item())
+
+            all_y_bmi.append(y_bmi.cpu().numpy())
+            preds_numpy = outs.detach().cpu().numpy()
+            all_preds.append(preds_numpy)
+
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_y_bmi = np.concatenate(all_y_bmi, axis=0)
 
     mse_loss_avg = np.array(mse_loss).mean()
-    r2_losses_avg = np.array(r2_losses).mean()
 
-    return mse_loss_avg, r2_losses_avg
+    bad = ~np.logical_or(np.isnan(all_preds), np.isnan(all_y_bmi))
+    all_preds_filtered = np.compress(bad, all_preds)
+    all_y_bmi_filtered = np.compress(bad, all_y_bmi)
+
+    r2, _ = stats.pearsonr(all_preds_filtered, all_y_bmi_filtered)
+    r2 = r2**2
+
+    return mse_loss_avg, r2
 
 
 writer = SummaryWriter("logdir/bmi_randproj_train")
@@ -181,7 +189,7 @@ for e in range(epochs):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": dev_loss_per_epoch,
                 },
-                "outputs/best_bmi.pth",
+                BEST_MODEL_FILE,
             )
 
     writer.add_scalar("training/MSE Loss", loss_per_epoch, e)
@@ -193,6 +201,8 @@ for e in range(epochs):
     )
 
 print("TESTING THE MODEL")
+
+model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
 
 test_loss_per_epoch, test_r2_loss_per_epoch = evaluate_model(model, test_dataloader)
 print(

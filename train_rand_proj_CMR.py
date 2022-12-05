@@ -8,9 +8,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import tqdm
+
+import scipy
+from scipy import stats
 from torch.utils.tensorboard import SummaryWriter
 
-
+BEST_MODEL_FILE = "outputs/best_cmr.pth"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
@@ -115,22 +118,34 @@ def r2_loss(output, target):
 
 def evaluate_model(model, dataloader):
     mse_loss = []
-    r2_losses = []
+
+    all_preds = []
+    all_y_cmr = []
 
     for idx, batch in enumerate(dataloader):
         x, y_bmi, y_cmr = batch
         with torch.no_grad():
             outs = model(x).squeeze()
             loss = loss_fn(outs, y_cmr)
-            r2_val_loss = r2_loss(outs, y_cmr)
 
             mse_loss.append(loss.item())
-            r2_losses.append(r2_val_loss.item())
+            all_y_cmr.append(y_cmr.cpu().numpy())
+            preds_numpy = outs.detach().cpu().numpy()
+            all_preds.append(preds_numpy)
+
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_y_cmr = np.concatenate(all_y_cmr, axis=0)
 
     mse_loss_avg = np.array(mse_loss).mean()
-    r2_losses_avg = np.array(r2_losses).mean()
 
-    return mse_loss_avg, r2_losses_avg
+    bad = ~np.logical_or(np.isnan(all_preds), np.isnan(all_y_cmr))
+    all_preds_filtered = np.compress(bad, all_preds)
+    all_y_cmr_filtered = np.compress(bad, all_y_cmr)
+
+    r2, _ = stats.pearsonr(all_preds_filtered, all_y_cmr_filtered)
+    r2 = r2**2
+
+    return mse_loss_avg, r2
 
 
 writer = SummaryWriter("logdir/cmr_randproj_train")
@@ -172,7 +187,7 @@ for e in range(epochs):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": dev_loss_per_epoch,
                 },
-                "outputs/best_cmr.pth",
+                BEST_MODEL_FILE,
             )
 
     writer.add_scalar("training/MSE Loss", loss_per_epoch, e)
@@ -185,6 +200,7 @@ for e in range(epochs):
 
 print("TESTING THE MODEL")
 
+model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
 test_loss_per_epoch, test_r2_loss_per_epoch = evaluate_model(model, test_dataloader)
 print(
     f"===========> FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
