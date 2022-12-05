@@ -29,16 +29,20 @@ class MultiTaskNet(nn.Module):
             nn.Linear(layer_sizes[2], layer_sizes[3]),
         )
 
-        self.last_layer = nn.Linear(
+        self.last_layer_bmi = nn.Linear(
+            layer_sizes[3], 1
+        )  ## change if we need classification or softmax
+        self.last_layer_cmr = nn.Linear(
             layer_sizes[3], 1
         )  ## change if we need classification or softmax
 
     def forward(self, x):
         x = self.mlp_net(x)
 
-        out_x = self.last_layer(x)
+        out_bmi = self.last_layer_bmi(x)
+        out_cmr = self.last_layer_cmr(x)
 
-        return out_x
+        return out_bmi, out_cmr
 
 
 with open("data/train_random_proj.pt", "rb") as f:
@@ -71,22 +75,13 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 20
-lr = 1e-4
+epochs = 200
+lr = 1e-5
 batch_size = 256
 
 print("data loaders ...")
 
 
-# train_dataloader = DataLoader(
-#     (train_proj, train_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
-# dev_dataloader = DataLoader(
-#     (dev_proj, dev_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
-# test_dataloader = DataLoader(
-#     (test_proj, test_labels), batch_size=batch_size, collate_fn=collate_fn
-# )
 train_dataloader = DataLoader(
     TensorDataset(*collate_fn((train_proj, train_labels))), batch_size=batch_size
 )
@@ -121,37 +116,66 @@ def r2_loss(output, target):
 
 
 def evaluate_model(model, dataloader):
+    mse_bmi = []
+    mse_cmr = []
+
+    r2_bmi_vals = []
+    r2_cmr_vals = []
+
     mse_loss = []
-    r2_losses = []
 
     for idx, batch in enumerate(dataloader):
         x, y_bmi, y_cmr = batch
         with torch.no_grad():
-            outs = model(x).squeeze()
-            loss = loss_fn(outs, y_bmi)
-            r2_val_loss = r2_loss(outs, y_bmi)
+            out_bmi, out_cmr = model(x)
+            out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
+
+            loss_bmi = loss_fn(out_bmi, y_cmr)
+            loss_cmr = loss_fn(out_cmr, y_cmr)
+
+            loss = loss_bmi + loss_cmr
+
+            r2_bmi = r2_loss(out_bmi, y_cmr)
+            r2_cmr = r2_loss(out_cmr, y_cmr)
 
             mse_loss.append(loss.item())
-            r2_losses.append(r2_val_loss.item())
+            mse_bmi.append(loss_bmi.item())
+            mse_cmr.append(loss_cmr.item())
+
+            r2_bmi_vals.append(r2_bmi.item())
+            r2_cmr_vals.append(r2_cmr.item())
 
     mse_loss_avg = np.array(mse_loss).mean()
-    r2_losses_avg = np.array(r2_losses).mean()
+    mse_bmi_avg = np.array(mse_bmi).mean()
+    mse_cmr_avg = np.array(mse_cmr).mean()
 
-    return mse_loss_avg, r2_losses_avg
+    r2_cmr_avg = np.array(r2_cmr_vals).mean()
+    r2_bmi_avg = np.array(r2_bmi_vals).mean()
+
+    return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi_avg, r2_cmr_avg
 
 
-writer = SummaryWriter("logdir/bmi_randproj_train")
+writer = SummaryWriter("logdir/multitask_randproj")
 best_valid_loss = float("inf")
 for e in range(epochs):
     print("Training ... ")
     train_loss = []
+    mse_bmi = []
+    mse_cmr = []
+
     idx = 0
     for batch in train_dataloader:
         x, y_bmi, y_cmr = batch
-        outs = model(x).squeeze()
-        loss = loss_fn(outs, y_bmi)
+        out_bmi, out_cmr = model(x)
+        out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
+
+        loss_bmi = loss_fn(out_bmi, y_cmr)
+        loss_cmr = loss_fn(out_cmr, y_cmr)
+        loss = loss_bmi + loss_cmr
 
         train_loss.append(loss.item())
+        mse_bmi.append(loss_bmi.item())
+        mse_cmr.append(loss_cmr.item())
 
         loss.backward()
         optimizer.step()
@@ -159,17 +183,26 @@ for e in range(epochs):
         idx += 1
         print(f"Epoch - {e}, Batch - {idx}, Loss -  {loss}")
 
-    loss_per_epoch = np.array(train_loss).mean()
+    train_loss_avg = np.array(train_loss).mean()
+    train_mse_bmi = np.array(mse_bmi).mean()
+    train_mse_cmr = np.array(mse_cmr).mean()
 
-    print(f"===========> TRAIN EPOCH {e}, TRAIN LOSS PER EPOCH {loss_per_epoch} ")
+    print(
+        f"===========> TRAIN EPOCH {e}, TRAIN BMI MSE {train_mse_bmi} , TRAIN CMR MSE {train_mse_cmr} "
+    )
 
     print("Running Validation")
 
-    dev_loss_per_epoch, dev_r2_loss_per_epoch = evaluate_model(model, dev_dataloader)
-
+    (
+        dev_mse_bmi_avg,
+        dev_mse_cmr_avg,
+        dev_mse_loss_avg,
+        dev_r2_bmi_avg,
+        dev_r2_cmr_avg,
+    ) = evaluate_model(model, dev_dataloader)
     if (e + 1) % 1 == 0:  ### saving checkpoint for every 5 epochs
-        if dev_loss_per_epoch < best_valid_loss:
-            best_valid_loss = dev_loss_per_epoch
+        if dev_mse_loss_avg < best_valid_loss:
+            best_valid_loss = dev_mse_loss_avg
             print(f"\nBest validation loss: {best_valid_loss}")
             print(f"\nSaving best model for epoch: {e+1}\n")
             torch.save(
@@ -177,22 +210,34 @@ for e in range(epochs):
                     "epoch": e + 1,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "loss": dev_loss_per_epoch,
+                    "loss": dev_mse_loss_avg,
                 },
-                "outputs/best_bmi.pth",
+                "outputs/best_multitask.pth",
             )
 
-    writer.add_scalar("training/MSE Loss", loss_per_epoch, e)
-    writer.add_scalar("eval/MSE Loss", dev_loss_per_epoch, e)
-    writer.add_scalar("eval/R2 SCORE", dev_r2_loss_per_epoch, e)
+    writer.add_scalar("training/MSE Loss", train_loss_avg, e)
+    writer.add_scalar("training/MSE BMI", train_mse_bmi, e)
+    writer.add_scalar("training/MSE CMR", train_mse_cmr, e)
+
+    writer.add_scalar("eval/BMI_MSE", dev_mse_bmi_avg, e)
+    writer.add_scalar("eval/BMI_r2", dev_r2_bmi_avg, e)
+
+    writer.add_scalar("eval/CMR_MSE", dev_mse_cmr_avg, e)
+    writer.add_scalar("eval/CMR_r2", dev_r2_cmr_avg, e)
 
     print(
-        f"===========> VALIDATION EPOCH {e}, MSE LOSS - {dev_loss_per_epoch}, R2 LOSS - {dev_r2_loss_per_epoch} "
+        f"===========> VALIDATION EPOCH {e}, MSE LOSS - {dev_mse_loss_avg}, BMI R2 LOSS - {dev_r2_bmi_avg}, CMR R2 LOSS - {dev_r2_cmr_avg} "
     )
 
 print("TESTING THE MODEL")
 
-test_loss_per_epoch, test_r2_loss_per_epoch = evaluate_model(model, test_dataloader)
+(
+    test_mse_bmi_avg,
+    test_mse_cmr_avg,
+    test_mse_loss_avg,
+    test_r2_bmi_avg,
+    test_r2_cmr_avg,
+) = evaluate_model(model, test_dataloader)
 print(
-    f"===========> FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
+    f"===========> VALIDATION EPOCH {e}, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
 )
