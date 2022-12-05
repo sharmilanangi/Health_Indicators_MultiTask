@@ -112,7 +112,9 @@ def r2_loss(output, target):
     ss_tot = torch.nansum(((target - target_mean)) ** 2)
     ss_res = torch.nansum(((target - output)) ** 2)
     r2 = 1 - ss_res / ss_tot
-    return r2
+
+    mask = torch.isnan(target)
+    return torch.where(mask, 0.0, r2)
 
 
 def evaluate_model(model, dataloader):
