@@ -6,7 +6,7 @@ import pickle
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
@@ -71,19 +71,30 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 5#20
+epochs = 5  # 20
 lr = 1e-4
-batch_size = 16
+batch_size = 256
 
 print("data loaders ...")
+
+
+# train_dataloader = DataLoader(
+#     (train_proj, train_labels), batch_size=batch_size, collate_fn=collate_fn
+# )
+# dev_dataloader = DataLoader(
+#     (dev_proj, dev_labels), batch_size=batch_size, collate_fn=collate_fn
+# )
+# test_dataloader = DataLoader(
+#     (test_proj, test_labels), batch_size=batch_size, collate_fn=collate_fn
+# )
 train_dataloader = DataLoader(
-    (train_proj, train_labels), batch_size=batch_size, collate_fn=collate_fn
+    TensorDataset(*collate_fn((train_proj, train_labels))), batch_size=batch_size
 )
 dev_dataloader = DataLoader(
-    (dev_proj, dev_labels), batch_size=batch_size, collate_fn=collate_fn
+    TensorDataset(*collate_fn((dev_proj, dev_labels))), batch_size=batch_size
 )
 test_dataloader = DataLoader(
-    (test_proj, test_labels), batch_size=batch_size, collate_fn=collate_fn
+    TensorDataset(*collate_fn((test_proj, test_labels))), batch_size=batch_size
 )
 
 
