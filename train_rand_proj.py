@@ -71,7 +71,7 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 20
+epochs = 5#20
 lr = 1e-4
 batch_size = 16
 
@@ -88,9 +88,11 @@ test_dataloader = DataLoader(
 
 
 def masked_mse(output, target):
-    mse_loss = nn.MSELoss(reduction="none")
-    loss = mse_loss(output, target)
-    return torch.nanmean(loss)
+    mse_loss = nn.MSELoss()
+    mask = torch.isnan(target)
+    target = torch.where(mask, 0.0, target)
+    output = torch.where(mask, 0.0, output)
+    return mse_loss(target, output)
 
 
 print("Model loading")
