@@ -71,7 +71,7 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 5  # 20
+epochs = 20
 lr = 1e-4
 batch_size = 256
 
