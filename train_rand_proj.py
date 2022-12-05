@@ -89,10 +89,8 @@ test_dataloader = DataLoader(
 
 def masked_mse(output, target):
     mse_loss = nn.MSELoss(reduction="none")
-    mask = ~target.isnan()
     loss = mse_loss(output, target)
-    loss = (loss).nansum()
-    return loss / torch.sum(mask)
+    return torch.nanmean(loss)
 
 
 print("Model loading")
