@@ -14,13 +14,20 @@ from scipy import stats
 
 from torch.utils.tensorboard import SummaryWriter
 
-BEST_MODEL_FILE = "outputs/best_bmi.pth"
+PROJECTION_SIZE = 512
+BEST_MODEL_FILE = f"outputs/best_bmi_randproj_{PROJECTION_SIZE}.pth"
+WRITER_PATH = f"logdir/bmi_randproj_{PROJECTION_SIZE}"
+epochs = 100
+lr = 1e-4
+batch_size = 256
+
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
 
 class MultiTaskNet(nn.Module):
-    def __init__(self, embed_dim=11348, layer_sizes=[2048, 500, 2048, 500]):
+    def __init__(self, embed_dim=11348, layer_sizes=[PROJECTION_SIZE, 512, 256, 128]):
         super().__init__()
 
         self.embedding_dim = embed_dim
@@ -45,11 +52,11 @@ class MultiTaskNet(nn.Module):
         return out_x
 
 
-with open("data/train_random_proj.pt", "rb") as f:
+with open(f"data/train_random_proj_{PROJECTION_SIZE}.pt", "rb") as f:
     train_proj = torch.load(f)
-with open("data/dev_random_proj.pt", "rb") as f:
+with open(f"data/dev_random_proj_{PROJECTION_SIZE}.pt", "rb") as f:
     dev_proj = torch.load(f)
-with open("data/test_random_proj.pt", "rb") as f:
+with open(f"data/test_random_proj_{PROJECTION_SIZE}.pt", "rb") as f:
     test_proj = torch.load(f)
 
 train_labels = pd.read_parquet(
@@ -74,10 +81,6 @@ def collate_fn(data):
     )
     return x_inp, y_bmi, y_cmr
 
-
-epochs = 100
-lr = 1e-4
-batch_size = 256
 
 print("data loaders ...")
 
@@ -105,16 +108,6 @@ print("Model loading")
 model = MultiTaskNet().to(device)
 loss_fn = masked_mse
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-
-
-# def r2_loss(output, target):
-#     target_mean = torch.nanmean(target)
-#     ss_tot = torch.nansum(((target - target_mean)) ** 2)
-#     ss_res = torch.nansum(((target - output)) ** 2)
-#     r2 = 1 - ss_res / ss_tot
-
-#     mask = torch.isnan(target)
-#     return torch.where(mask, 0.0, r2)
 
 
 def evaluate_model(model, dataloader):
@@ -150,7 +143,7 @@ def evaluate_model(model, dataloader):
     return mse_loss_avg, r2
 
 
-writer = SummaryWriter("logdir/bmi_randproj_train")
+writer = SummaryWriter(WRITER_PATH)
 best_valid_loss = float("inf")
 for e in range(epochs):
     print("Training ... ")
@@ -204,7 +197,16 @@ print("TESTING THE MODEL")
 
 model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
 
+print(f"Projection size {PROJECTION_SIZE}")
+train_loss_per_epoch, train_r2_loss_per_epoch = evaluate_model(model, dev_dataloader)
+print(
+    f"FINAL TRAIN, MSE LOSS - {train_loss_per_epoch}, R2 LOSS - {train_r2_loss_per_epoch} "
+)
+dev_loss_per_epoch, dev_r2_loss_per_epoch = evaluate_model(model, dev_dataloader)
+
+print(f"FINAL VAL, MSE LOSS - {dev_loss_per_epoch}, R2 LOSS - {dev_r2_loss_per_epoch} ")
+
 test_loss_per_epoch, test_r2_loss_per_epoch = evaluate_model(model, test_dataloader)
 print(
-    f"===========> FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
+    f"FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
 )
