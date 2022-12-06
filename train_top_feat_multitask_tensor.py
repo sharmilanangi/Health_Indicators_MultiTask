@@ -13,13 +13,20 @@ from torch.utils.tensorboard import SummaryWriter
 import scipy
 from scipy import stats
 
-
+BEST_MODEL_FILE = "outputs/best_multitask_top_feat.pth"
+LOSS_WEIGHT = 0.9
+WRITER_PATH = f"logdir/multitask_top_feat"
+epochs = 200
+lr = 1e-5
+batch_size = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
+assert LOSS_WEIGHT < 1 and LOSS_WEIGHT > 0
+
 
 class MultiTaskNet(nn.Module):
-    def __init__(self, embed_dim=11348, layer_sizes=[2048, 500, 2048, 500]):
+    def __init__(self, embed_dim=11348, layer_sizes=[462, 512, 256, 128]):
         super().__init__()
 
         self.embedding_dim = embed_dim
@@ -78,10 +85,6 @@ def collate_fn(data):
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 200
-lr = 1e-5
-batch_size = 256
-
 print("data loaders ...")
 
 
@@ -124,8 +127,10 @@ def evaluate_model(model, dataloader):
     mse_bmi = []
     mse_cmr = []
 
-    r2_bmi_vals = []
-    r2_cmr_vals = []
+    all_preds_bmi = []
+    all_preds_cmr = []
+    all_y_bmi = []
+    all_y_cmr = []
 
     mse_loss = []
 
@@ -134,33 +139,46 @@ def evaluate_model(model, dataloader):
         with torch.no_grad():
             out_bmi, out_cmr = model(x)
             out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
-
-            loss_bmi = loss_fn(out_bmi, y_cmr)
+            loss_bmi = loss_fn(out_bmi, y_bmi)
             loss_cmr = loss_fn(out_cmr, y_cmr)
-
             loss = loss_bmi + loss_cmr
 
-            r2_bmi = r2_loss(out_bmi, y_cmr)
-            r2_cmr = r2_loss(out_cmr, y_cmr)
-
-            mse_loss.append(loss.item())
             mse_bmi.append(loss_bmi.item())
             mse_cmr.append(loss_cmr.item())
+            mse_loss.append(loss.item())
 
-            r2_bmi_vals.append(r2_bmi.item())
-            r2_cmr_vals.append(r2_cmr.item())
+            all_y_cmr.append(y_cmr.cpu().numpy())
+            all_y_bmi.append(y_bmi.cpu().numpy())
+            preds_bmi_numpy = out_bmi.detach().cpu().numpy()
+            all_preds_bmi.append(preds_bmi_numpy)
+            preds_cmr_numpy = out_cmr.detach().cpu().numpy()
+            all_preds_cmr.append(preds_cmr_numpy)
+
+    all_preds_bmi = np.concatenate(all_preds_bmi, axis=0)
+    all_preds_cmr = np.concatenate(all_preds_cmr, axis=0)
+    all_y_bmi = np.concatenate(all_y_bmi, axis=0)
+    all_y_cmr = np.concatenate(all_y_cmr, axis=0)
 
     mse_loss_avg = np.array(mse_loss).mean()
     mse_bmi_avg = np.array(mse_bmi).mean()
     mse_cmr_avg = np.array(mse_cmr).mean()
 
-    r2_cmr_avg = np.array(r2_cmr_vals).mean()
-    r2_bmi_avg = np.array(r2_bmi_vals).mean()
+    bad = ~np.logical_or(np.isnan(all_preds_bmi), np.isnan(all_y_bmi))
+    all_preds_filtered = np.compress(bad, all_preds_bmi)
+    all_y_bmi_filtered = np.compress(bad, all_y_bmi)
+    r2_bmi, _ = stats.pearsonr(all_preds_filtered, all_y_bmi_filtered)
+    r2_bmi = r2_bmi**2
 
-    return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi_avg, r2_cmr_avg
+    bad = ~np.logical_or(np.isnan(all_preds_cmr), np.isnan(all_y_cmr))
+    all_preds_filtered = np.compress(bad, all_preds_cmr)
+    all_y_cmr_filtered = np.compress(bad, all_y_cmr)
+    r2_cmr, _ = stats.pearsonr(all_preds_filtered, all_y_cmr_filtered)
+    r2_cmr = r2_cmr**2
+
+    return mse_bmi_avg, mse_cmr_avg, mse_loss_avg, r2_bmi, r2_cmr
 
 
-writer = SummaryWriter("logdir/multitask_randproj")
+writer = SummaryWriter(WRITER_PATH)
 best_valid_loss = float("inf")
 for e in range(epochs):
     print("Training ... ")
@@ -174,9 +192,9 @@ for e in range(epochs):
         out_bmi, out_cmr = model(x)
         out_bmi, out_cmr = out_bmi.squeeze(), out_cmr.squeeze()
 
-        loss_bmi = loss_fn(out_bmi, y_cmr)
+        loss_bmi = loss_fn(out_bmi, y_bmi)
         loss_cmr = loss_fn(out_cmr, y_cmr)
-        loss = loss_bmi + loss_cmr
+        loss = (LOSS_WEIGHT * loss_bmi) + ((1 - LOSS_WEIGHT) * loss_cmr)
 
         train_loss.append(loss.item())
         mse_bmi.append(loss_bmi.item())
@@ -217,7 +235,7 @@ for e in range(epochs):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": dev_mse_loss_avg,
                 },
-                "outputs/best_multitask.pth",
+                BEST_MODEL_FILE,
             )
 
     writer.add_scalar("training/MSE Loss", train_loss_avg, e)
@@ -236,6 +254,41 @@ for e in range(epochs):
 
 print("TESTING THE MODEL")
 
+model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
+
+# (
+#     test_mse_bmi_avg,
+#     test_mse_cmr_avg,
+#     test_mse_loss_avg,
+#     test_r2_bmi_avg,
+#     test_r2_cmr_avg,
+# ) = evaluate_model(model, test_dataloader)
+# print(
+#     f"===========> VALIDATION EPOCH {e}, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
+# )
+
+print(f"Loss weights {LOSS_WEIGHT} - {1-LOSS_WEIGHT}")
+(
+    test_mse_bmi_avg,
+    test_mse_cmr_avg,
+    test_mse_loss_avg,
+    test_r2_bmi_avg,
+    test_r2_cmr_avg,
+) = evaluate_model(model, train_dataloader)
+print(
+    f"FINAL TRAIN, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
+)
+(
+    test_mse_bmi_avg,
+    test_mse_cmr_avg,
+    test_mse_loss_avg,
+    test_r2_bmi_avg,
+    test_r2_cmr_avg,
+) = evaluate_model(model, dev_dataloader)
+print(
+    f"FINAL VAL, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
+)
+
 (
     test_mse_bmi_avg,
     test_mse_cmr_avg,
@@ -244,5 +297,5 @@ print("TESTING THE MODEL")
     test_r2_cmr_avg,
 ) = evaluate_model(model, test_dataloader)
 print(
-    f"===========> VALIDATION EPOCH {e}, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
+    f"FINAL TEST, MSE LOSS - {test_mse_loss_avg}, BMI R2 LOSS - {test_r2_bmi_avg}, CMR R2 LOSS - {test_r2_cmr_avg} "
 )
