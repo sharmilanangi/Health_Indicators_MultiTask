@@ -5,17 +5,24 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 import tqdm
+from scipy import stats
 from torch.utils.tensorboard import SummaryWriter
 
+
+BEST_MODEL_FILE = f"outputs/best_bmi_full_data.pth"
+WRITER_PATH = f"logdir/bmi_best_full_data"
+epochs = 100
+lr = 1e-4
+batch_size = 256
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("DEVICE IS ... ", device)
 
 
 class MultiTaskNet(nn.Module):
-    def __init__(self, embed_dim=11348, layer_sizes=[11348, 500, 11348, 500]):
+    def __init__(self, embed_dim=11348, layer_sizes=[11333, 512, 256, 128]):
         super().__init__()
 
         self.embedding_dim = embed_dim
@@ -40,104 +47,102 @@ class MultiTaskNet(nn.Module):
         return out_x
 
 
-dataset = datasets.load_dataset(
-    "parquet",
-    data_files={
-        "train": "./data_processed/train.parquet.gzip",
-        "dev": "./data_processed/dev.parquet.gzip",
-        "test": "./data_processed/test.parquet.gzip",
-    },
+train_proj = torch.tensor(
+    pd.read_parquet("data/train_normalized.parquet.gzip").values, dtype=torch.float32
+)
+dev_proj = torch.tensor(
+    pd.read_parquet("data/dev_normalized.parquet.gzip").values, dtype=torch.float32
+)
+test_proj = torch.tensor(
+    pd.read_parquet("data/test_normalized.parquet.gzip").values, dtype=torch.float32
+)
+
+
+train_labels = pd.read_parquet(
+    "data/train_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
+)
+dev_labels = pd.read_parquet(
+    "data/dev_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
+)
+test_labels = pd.read_parquet(
+    "data/test_20221130.parquet.gzip", columns=["Mean_BMI", "Under5_Mortality_Rate"]
 )
 
 print("DATA LOADED")
 
-other_keys = [
-    "Mean_BMI",
-    "Under5_Mortality_Rate",
-    "Stunted_Rate",
-    "new_ind",
-    "key1",
-    "key2",
-    "key3",
-    "DATUM",
-    "DHSCC",
-    "DHSID_x",
-    "DHSREGNA",
-    "SOURCE",
-    "URBAN_RURA_x",
-    "CCFIPS",
-    "DHSID_y",
-    "URBAN_RURA_y",
-    "ADM1NAME",
-]
 
-
-def collate_fn_restructure(data):
-
-    df = pd.DataFrame(
-        data,
-    )
-    all_keys = list(df.keys())
-    feat_keys = [i for i in all_keys if i not in other_keys]
-
-    x_inp = torch.tensor(df[feat_keys].values, dtype=torch.float32, device=device)
-    y_bmi = torch.tensor(df["Mean_BMI"].values, dtype=torch.float32, device=device)
+def collate_fn(data):
+    x, y_df = data
+    x_inp = x.to(device)
+    y_bmi = torch.tensor(y_df["Mean_BMI"].values, dtype=torch.float32, device=device)
     y_cmr = torch.tensor(
-        df["Under5_Mortality_Rate"].values, dtype=torch.float32, device=device
+        y_df["Under5_Mortality_Rate"].values, dtype=torch.float32, device=device
     )
     return x_inp, y_bmi, y_cmr
 
 
-epochs = 20
-lr = 1e-4
-batch_size = 16
-
 print("data loaders ...")
+
+
 train_dataloader = DataLoader(
-    dataset["train"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    TensorDataset(*collate_fn((train_proj, train_labels))), batch_size=batch_size
 )
 dev_dataloader = DataLoader(
-    dataset["dev"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    TensorDataset(*collate_fn((dev_proj, dev_labels))), batch_size=batch_size
 )
 test_dataloader = DataLoader(
-    dataset["test"], batch_size=batch_size, collate_fn=collate_fn_restructure
+    TensorDataset(*collate_fn((test_proj, test_labels))), batch_size=batch_size
 )
+
+
+def masked_mse(output, target):
+    mse_loss = nn.MSELoss()
+    mask = torch.isnan(target)
+    target = torch.where(mask, 0.0, target)
+    output = torch.where(mask, 0.0, output)
+    return mse_loss(target, output)
+
 
 print("Model loading")
 model = MultiTaskNet().to(device)
-loss_fn = nn.MSELoss()
+loss_fn = masked_mse
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-
-
-def r2_loss(output, target):
-    target_mean = torch.mean(target)
-    ss_tot = torch.sum((target - target_mean) ** 2)
-    ss_res = torch.sum((target - output) ** 2)
-    r2 = 1 - ss_res / ss_tot
-    return r2
 
 
 def evaluate_model(model, dataloader):
     mse_loss = []
-    r2_losses = []
+
+    all_preds = []
+    all_y_bmi = []
 
     for idx, batch in enumerate(dataloader):
         x, y_bmi, y_cmr = batch
         with torch.no_grad():
             outs = model(x).squeeze()
             loss = loss_fn(outs, y_bmi)
-            r2_val_loss = r2_loss(outs, y_bmi)
 
             mse_loss.append(loss.item())
-            r2_losses.append(r2_val_loss.item())
+
+            all_y_bmi.append(y_bmi.cpu().numpy())
+            preds_numpy = outs.detach().cpu().numpy()
+            all_preds.append(preds_numpy)
+
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_y_bmi = np.concatenate(all_y_bmi, axis=0)
 
     mse_loss_avg = np.array(mse_loss).mean()
-    r2_losses_avg = np.array(r2_losses).mean()
 
-    return mse_loss_avg, r2_losses_avg
+    bad = ~np.logical_or(np.isnan(all_preds), np.isnan(all_y_bmi))
+    all_preds_filtered = np.compress(bad, all_preds)
+    all_y_bmi_filtered = np.compress(bad, all_y_bmi)
+
+    r2, _ = stats.pearsonr(all_preds_filtered, all_y_bmi_filtered)
+    r2 = r2**2
+
+    return mse_loss_avg, r2
 
 
-writer = SummaryWriter("logdir/bmi_train")
+writer = SummaryWriter(WRITER_PATH)
 best_valid_loss = float("inf")
 for e in range(epochs):
     print("Training ... ")
@@ -176,7 +181,7 @@ for e in range(epochs):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": dev_loss_per_epoch,
                 },
-                "outputs/best_bmi.pth",
+                BEST_MODEL_FILE,
             )
 
     writer.add_scalar("training/MSE Loss", loss_per_epoch, e)
@@ -189,7 +194,17 @@ for e in range(epochs):
 
 print("TESTING THE MODEL")
 
+model.load_state_dict(torch.load(BEST_MODEL_FILE)["model_state_dict"])
+
+train_loss_per_epoch, train_r2_loss_per_epoch = evaluate_model(model, train_dataloader)
+print(
+    f"FINAL TRAIN, MSE LOSS - {train_loss_per_epoch}, R2 LOSS - {train_r2_loss_per_epoch} "
+)
+dev_loss_per_epoch, dev_r2_loss_per_epoch = evaluate_model(model, dev_dataloader)
+
+print(f"FINAL VAL, MSE LOSS - {dev_loss_per_epoch}, R2 LOSS - {dev_r2_loss_per_epoch} ")
+
 test_loss_per_epoch, test_r2_loss_per_epoch = evaluate_model(model, test_dataloader)
 print(
-    f"===========> FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
+    f"FINAL TEST, MSE LOSS - {test_loss_per_epoch}, R2 LOSS - {test_r2_loss_per_epoch} "
 )

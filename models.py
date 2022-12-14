@@ -1,10 +1,10 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class SingleTaskNet(nn.Module):
-    def __init__(self, layer_sizes=[462, 512, 256 , 128]):
+    def __init__(self, layer_sizes=[462, 512, 256, 128]):
         super().__init__()
 
         self.mlp_net = nn.Sequential(
@@ -24,8 +24,11 @@ class SingleTaskNet(nn.Module):
         out_x = self.last_layer(x)
         return out_x
 
+
 class MultiTaskNet(nn.Module):
-    def __init__(self, shared_layer_sizes=[462, 512, 256], task_head_layers=[256, 128, 64, 1]):
+    def __init__(
+        self, shared_layer_sizes=[462, 512, 256], task_head_layers=[256, 128, 64, 1]
+    ):
         super().__init__()
 
         self.mlp_net = nn.Sequential(
@@ -42,12 +45,15 @@ class MultiTaskNet(nn.Module):
             nn.Linear(task_head_layers[2], task_head_layers[3]),
         )
 
+        # self.last_layer_cmr = nn.Sequential(
+        #     nn.Linear(task_head_layers[0], task_head_layers[1]),  ## 462 x 512
+        #     nn.ReLU(),
+        #     nn.Linear(task_head_layers[1], task_head_layers[2]),  ## 512
+        #     nn.ReLU(),
+        #     nn.Linear(task_head_layers[2], task_head_layers[3]),
+        # )
         self.last_layer_cmr = nn.Sequential(
-            nn.Linear(task_head_layers[0], task_head_layers[1]),  ## 462 x 512
-            nn.ReLU(),
-            nn.Linear(task_head_layers[1], task_head_layers[2]),  ## 512
-            nn.ReLU(),
-            nn.Linear(task_head_layers[2], task_head_layers[3]),
+            nn.Linear(task_head_layers[0], task_head_layers[3]),
         )
 
     def forward(self, x):
