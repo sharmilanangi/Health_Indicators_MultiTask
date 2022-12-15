@@ -93,6 +93,25 @@ Loading the best model after epoch -  93
 
 
 # PCA Dim reduction
+
+
+
+
+
+
+
+
+# Top features deeep
+0.5-0.5
+Running Validation
+===========> VALIDATION EPOCH 199, MSE LOSS - 15.957751671473185, BMI R2 LOSS - 0.6103082180170012, CMR R2 LOSS - 0.3626684908325747 
+TESTING THE MODEL
+Loading the best model after epoch -  93
+===========> TEST RESULTS - TOTAL MSE LOSS - 16.459842591236036, BMI R2 LOSS - 0.5708436012790721, CMR R2 LOSS - 0.19843205823958848 
+
+
+
+# PCA Dim reduction
 2048
 
 BMI 
